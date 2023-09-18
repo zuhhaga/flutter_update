@@ -1,0 +1,112 @@
+name: CI
+on:
+  workflow_dispatch:
+
+permissions: write-all
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3   
+        with: 
+          submodules: true
+      
+      - name: Restore cache
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            dart-sdk
+            flutter.tar.gz
+          key: flutter-cache
+          
+      - name: Update flutter cache
+        run: |
+          rel='https://storage.googleapis.com/dart-archive/channels/beta/release/latest/VERSION'
+          ver="$(curl -s "${rel}" | jq -r .version)"
+          lnk="https://storage.googleapis.com/dart-archive/channels/beta/release/${ver}/sdk/dartsdk-linux-x64-release.zip"
+          sdk='dart-sdk'
+          
+          if [ -e "${sdk}" ]; then
+            if [ -e "${sdk}/version" ]; then
+              if [ "$(cat "${sdk}/version")" == "${ver}" ]; then
+                lnk=''
+              fi
+            fi
+          fi
+          
+          if [ -n "${lnk}" ]; then
+            if [ -e "${sdk}" ]; then
+              rm -R "${sdk}"
+            fi
+            curl -o "dart-sdk-${ver}.zip" "${lnk}" -C -
+            unzip "dart-sdk-${ver}.zip"
+          fi
+          
+          libold="$(pwd)/dart-sdk"
+          lib=/usr/lib/dart-sdk
+          sudo ln -s "$libold" "$lib"
+          tarf='flutter.tar.gz'
+          
+          if [ ! -d 'flutter' ]; then
+            if [ -f "${tarf}" ]; then
+              tar -xzf "${tarf}"
+              cd flutter
+              changed=0
+              git remote update && git status -uno | grep -q 'Your branch is behind' && changed=1
+              cd ..
+              if [ "$changed" == "1" ]; then
+                fakeroot rm -R flutter
+                echo updating flutter
+              else
+                echo flutter is already the newest version
+              fi
+            fi
+          fi
+          
+          if [ ! -d 'flutter' ]; then
+            git clone --depth 1 'https://github.com/flutter/flutter' 'flutter'
+            cd flutter/bin
+            mkdir cache
+            cp internal/engine.version cache/engine-dart-sdk.stamp
+            ln -s "${lib}" cache/dart-sdk
+            ./flutter
+            cd ../..
+            if [ -e "${tarf}" ]; then
+              rm -R "${tarf}"
+            fi
+            tar -czf "${tarf}" 'flutter'
+          fi
+          file=flutter/bin/cache/flutter.version.json
+          ver=$(cat "$file" | jq -r .frameworkRevision | cut -b 1-10)
+          echo "$ver" > version 
+          fakeroot rm -R flutter
+          fakeroot rm -R dart-sdk
+          GH_TOKEN=${{ secrets.GITHUB_TOKEN }} gh cache delete 'flutter-cache' || :
+      
+      - name: Save cache
+        uses: actions/cache/save@v3
+        with:
+          path: | 
+            dart-sdk
+            flutter.tar.gz
+          key: flutter-cache
+          
+        #uses: actions/upload-artifact@v3
+        #with:
+        #  name: flutter
+        
+        #  path: flutter.tar.gz
+      - name: Save artifact
+        run: |
+          git config user.email U
+          git config user.name U
+          git checkout --orphan latest
+          git add flutter.tar.gz
+          git tag $(cat version)
+          git add .github/workflows/blank.yml
+          git commit -am 'update'
+          git branch -D main
+          git branch -m main
+          git push -f origin main --tags
+          
+          
